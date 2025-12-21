@@ -1,6 +1,12 @@
 # Maypaper
 The super dynamic wallpaper tool!
 
+
+https://github.com/user-attachments/assets/e5fda2fb-4649-4fdb-ab92-9d1d9f168a0f
+
+*a demo with shadertoys, and webgl fluid sim*
+
+
 ## Introduction
 Maypaper is a tool which allows you to put a webpage (ideally locally installed, or remote) as your wallpaper, using webkitgtk. It comes with accompanying tools to manage the installation and updates of wallpapers, although these are entirely optional.
 
