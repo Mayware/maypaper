@@ -1,24 +1,97 @@
-use gtk4::glib::object::{Cast, ObjectExt};
-use gtk4::prelude::{ApplicationExt, ApplicationExtManual, GtkWindowExt};
-use gtk4::{Application, ApplicationWindow, glib};
+use gtk4::glib::object::Cast;
+use gtk4::prelude::{ApplicationExt, ApplicationExtManual};
+use gtk4::{Application, glib};
 
-use gtk4::gdk::prelude::DisplayExt;
+use gtk4::gdk::prelude::{DisplayExt, MonitorExt};
 use gtk4::gio::prelude::ListModelExt;
 use gtk4::{gdk, gio};
 
-use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-
-use maypaper::{Ipc, get_default_socket_path};
-use tracing::{error, info};
+use tokio::sync::mpsc;
+use tracing::info;
 use webkit6::WebView;
 use webkit6::prelude::WebViewExt;
 
-use std::fs;
-use std::io::{BufRead, BufReader};
-use std::os::unix::net::UnixListener;
-use std::thread;
+use crate::event::{IpcEvent, ReleaseServer, TokioEvent, UiCmd, UiEvent, WebCmd, WebEvent};
+
+mod event;
+mod ipc;
+mod webserver;
+mod webview;
+
+fn start_tokio(ui_tx: async_channel::Sender<UiCmd>, bg_rx: async_channel::Receiver<UiEvent>) {
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime");
+
+        rt.block_on(async move {
+            let (tokio_tx, mut tokio_rx) = mpsc::unbounded_channel::<TokioEvent>();
+
+            //let (ipc_tx, ipc_rx) = mpsc::unbounded_channel();
+            let (web_tx, web_rx) = mpsc::unbounded_channel::<WebCmd>();
+
+            // Each spawned task can take: tokio_tx, their_own_rx, if they need it
+            tokio::spawn(ipc::ipc_server(tokio_tx.clone()));
+            info!(target: "tokio", "Started ipc_server");
+            tokio::spawn(webserver::web_manager(tokio_tx.clone(), web_rx));
+            info!(target: "tokio", "Started web_manager");
+
+            loop {
+                tokio::select! {
+                    bg = bg_rx.recv() => {
+                        info!(target: "tokio", "Received an event from glib");
+                        match bg {
+                            Ok(event) => {
+                                match event {
+                                    UiEvent::ReleaseServer(release_server) => {
+                                        info!(target: "tokio", release_server = ?release_server, "Received");
+                                        info!(target: "tokio", "Forwarding to webserver");
+                                        let _ = web_tx.send(WebCmd::ReleaseServer(release_server));
+                                    },
+                                }
+                            }
+                            Err(_) => {}
+                        }
+                    }
+
+                    tk = tokio_rx.recv() => {
+                        match tk {
+                            Some(event) => {
+                                match event {
+                                    TokioEvent::IpcEvent(ipc_event) => match ipc_event {
+                                        IpcEvent::AcquireServer(acquire_server) => {
+                                            info!(target: "tokio", acquire_server = ?acquire_server, "Received");
+                                            info!(target: "tokio", "Forwarding to webserver");
+                                            let _ = web_tx.send(WebCmd::AcquireServer(acquire_server));
+                                        }
+                                        IpcEvent::ReloadWebview(_reload_webview) => todo!(),
+                                    },
+                                    TokioEvent::WebEvent(web_event) => match web_event {
+                                        WebEvent::SetWebview(set_webview) => {
+                                            info!(target: "tokio", set_webview = ?set_webview, "Received");
+                                            info!(target: "tokio", "Forwarding to glib");
+                                            let _ = ui_tx.send(UiCmd::SetWebview(set_webview)).await;
+                                        }
+                                    },
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+        });
+    });
+}
 
 fn main() -> glib::ExitCode {
+    if cfg!(debug_assertions) {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO) // INFO, WARN, ERROR
+            .init();
+    }
+
     // Set GSK_RENDERER to gl, otherwise performance is bombed
     // for many users, if the user wants to modify it, they can
     // simply set it before running the program
@@ -32,77 +105,38 @@ fn main() -> glib::ExitCode {
         .application_id("com.example.wallpaper")
         .build();
 
-    // Start IPC listening
-    let (tx, rx) = async_channel::unbounded::<Ipc>();
+    // Tokio is sender
+    let (ui_tx, ui_rx) = async_channel::unbounded::<UiCmd>();
 
-    thread::spawn(move || {
-        let socket_path = get_default_socket_path();
-        let _ = fs::remove_file(&socket_path); // Remove pre-existing socket, if it exists
+    // Glib is sender
+    let (bg_tx, bg_rx) = async_channel::unbounded::<UiEvent>();
 
-        let listener = match UnixListener::bind(&socket_path) {
-            Ok(listener) => listener,
-            Err(e) => {
-                error!("IPC: failed to bind socket {:?}: {}", socket_path, e);
-                return;
-            }
-        };
+    info!(target: "main", "Starting Tokio");
+    start_tokio(ui_tx, bg_rx);
 
-        info!("IPC: listening on {:?}", socket_path);
-
-        for connection in listener.incoming() {
-            let stream = match connection {
-                Ok(stream) => stream,
-                Err(e) => {
-                    error!("IPC: accept error: {}", e);
-                    continue;
-                }
-            };
-
-            // Handle each client connection (mypctl usually connects, sends 1 line, exits)
-            let tx = tx.clone();
-            thread::spawn(move || {
-                let reader = BufReader::new(stream);
-
-                for line in reader.lines() {
-                    let line = match line {
-                        Ok(l) => l,
-                        Err(e) => {
-                            error!("IPC: read line error: {}", e);
-                            break;
-                        }
-                    };
-
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-
-                    match serde_json::from_str::<Ipc>(&line) {
-                        Ok(msg) => {
-                            if let Err(e) = tx.send_blocking(msg) {
-                                error!("IPC: channel send failed: {}", e);
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            error!("IPC: bad JSON: {} | line: {}", e, line);
-                        }
-                    }
-                }
-            });
-        }
-    });
-
-    // Run application
-    app.connect_activate(move |app| build_ui(app, rx.clone()));
+    // Run application, this function is not fn-once which is why we use
+    // async channels over doing acrobatics for tokio's mpsc
+    info!(target: "main", "Starting UI");
+    app.connect_startup(move |app| build_ui(app, bg_tx.clone(), ui_rx.clone()));
     app.run()
 }
 
-fn build_ui(app: &Application, rx: async_channel::Receiver<Ipc>) {
+struct Instance {
+    webview: WebView,
+    connector: String,
+    wallpaper_path: Option<String>,
+}
+
+fn build_ui(
+    app: &Application,
+    bg_tx: async_channel::Sender<UiEvent>,
+    ui_rx: async_channel::Receiver<UiCmd>,
+) {
     // Build one window+webview per monitor
     let display = gdk::Display::default().expect("No GDK display");
     let monitors: gio::ListModel = display.monitors();
 
-    let mut webviews: Vec<WebView> = Vec::new();
+    let mut instances: Vec<Instance> = Vec::new();
 
     for i in 0..monitors.n_items() {
         let monitor = monitors
@@ -111,33 +145,47 @@ fn build_ui(app: &Application, rx: async_channel::Receiver<Ipc>) {
             .downcast::<gdk::Monitor>()
             .expect("Item wasn't a gdk::Monitor");
 
-        let webview = build_ui_for_monitor(app, &monitor, i);
-        webviews.push(webview);
-    }
+        let webview = webview::build_ui_for_monitor(app, &monitor, i);
+        let connector = monitor.connector().unwrap_or_default().to_string();
 
-    info!("Built {} webview(s)", webviews.len());
+        info!(target: "ui", connector = %connector, "Got Connector");
+        instances.push(Instance {
+            webview,
+            connector,
+            wallpaper_path: None,
+        });
+    }
 
     // Receive loop on GTK thread
     glib::MainContext::default().spawn_local(async move {
-        while let Ok(msg) = rx.recv().await {
-            match msg {
-                Ipc::Set { monitor, uri } => {
-                    if let Some(monitor) = monitor {
-                        if let Some(webview) = webviews.get(monitor) {
-                            webview.load_uri(&uri);
-                        } else {
-                            eprintln!("No webview for monitor index {monitor}");
-                        }
+        while let Ok(event) = ui_rx.recv().await {
+            info!(target: "glib", "Received an event from tokio");
+            match event {
+                UiCmd::SetWebview(set_webview) => {
+                    info!(target: "glib", set_webview = ?set_webview, "Received");
+                    if let Some(_monitor) = &set_webview.monitor {
+                        // TODO
+                        // for inst in &instances {
+                        //     // `connector()` exists on many setups; if not, use model/manufacturer/geometry
+                        //     if inst.connector == monitor {
+                        //         inst.webview.load_uri(&set_webview.url);
+                        //         break;
+                        //     }
+                        // }
                     } else {
-                        for webview in &webviews {
-                            webview.load_uri(&uri);
-                        }
-                    }
-                }
-                Ipc::Reload { monitor } => {
-                    if let Some(monitor) = monitor {
-                        if let Some(webview) = webviews.get(monitor) {
-                            webview.reload();
+                        for inst in &mut instances {
+                            let old_path: Option<String> = inst.wallpaper_path.clone();
+                            inst.wallpaper_path = set_webview.path.clone();
+                            if let Some(path) = old_path {
+                                let release_server = ReleaseServer { path };
+                                info!(target: "glib", release_server=?release_server, "Sending");
+                                let _ = bg_tx
+                                    .send(UiEvent::ReleaseServer(release_server))
+                                    .await;
+                                info!(target: "glib", "Finished Send");
+                            }
+                            inst.webview.load_uri(&set_webview.url);
+                            info!(target: "glib", url = %&set_webview.url, "Loaded")
                         }
                     }
                 }
@@ -146,49 +194,4 @@ fn build_ui(app: &Application, rx: async_channel::Receiver<Ipc>) {
 
         info!("IPC channel closed");
     });
-}
-
-fn build_ui_for_monitor(app: &Application, monitor: &gdk::Monitor, idx: u32) -> WebView {
-    let window = ApplicationWindow::new(app);
-    window.set_title(Some(&format!("maypaper (info) [{idx}]")));
-
-    window.init_layer_shell();
-    window.set_layer(Layer::Background);
-    window.set_monitor(Some(monitor));
-
-    window.set_anchor(Edge::Left, true);
-    window.set_anchor(Edge::Right, true);
-    window.set_anchor(Edge::Top, true);
-    window.set_anchor(Edge::Bottom, true);
-
-    window.set_exclusive_zone(-1);
-    window.set_keyboard_mode(KeyboardMode::OnDemand);
-    window.set_namespace(Some("live-wallpaper"));
-    window.set_decorated(false);
-
-    let webview = WebView::new();
-
-    // Muted, unless focused
-    webview.set_is_muted(true);
-    {
-        let webview = webview.clone();
-        window.connect_notify_local(Some("is-active"), move |window, _| {
-            let active = window.is_active();
-            webview.set_is_muted(!active);
-        });
-    }
-
-    let settings = webview.settings().unwrap();
-    settings.set_enable_webgl(true);
-    settings.set_enable_webaudio(true);
-    settings.set_enable_developer_extras(true);
-
-    webview.set_background_color(&gtk4::gdk::RGBA::new(0.20, 0.20, 0.20, 1.0));
-    // webview.load_uri("https://paveldogreat.github.io/WebGL-Fluid-Simulation/"); Cool default for
-    // testing
-
-    window.set_child(Some(&webview));
-    window.present();
-
-    webview
 }

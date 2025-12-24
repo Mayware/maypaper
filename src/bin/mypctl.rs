@@ -4,14 +4,15 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use clap::{Parser, Subcommand};
-use maypaper::{Ipc, Paths, get_default_socket_path};
+use maypaper::event::Ipc;
+use maypaper::{Paths, get_default_socket_path};
 use tracing::error;
 
 #[derive(Parser, Debug)]
 #[command(name = "mypctl", version, about = "Control maypaper via IPC")]
 struct Cli {
     /// The config directory. If left unspecified, XDG_CONFIG_HOME/maypaper is used
-    #[arg(long)]
+#[arg(long)]
     config_dir: Option<PathBuf>,
 
     /// Path to the maypaper IPC socket (defaults to /run/user/<uid>/maypaper.sock)

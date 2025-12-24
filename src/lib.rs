@@ -1,15 +1,10 @@
 use anyhow::Result;
 use std::{fs, path::PathBuf};
 
-use serde::{Deserialize, Serialize};
 use tracing::error;
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Ipc {
-    Set { monitor: Option<usize>, uri: String },
-    Reload { monitor: Option<usize> },
-}
+pub mod event;
+
 
 pub fn get_default_socket_path() -> PathBuf {
     if let Some(dir) = env::var_os("XDG_RUNTIME_DIR") {
