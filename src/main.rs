@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use gtk4::glib::object::Cast;
 use gtk4::prelude::{ApplicationExt, ApplicationExtManual};
 use gtk4::{Application, glib};
@@ -6,19 +9,25 @@ use gtk4::gdk::prelude::{DisplayExt, MonitorExt};
 use gtk4::gio::prelude::ListModelExt;
 use gtk4::{gdk, gio};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::info;
 use webkit6::WebView;
 use webkit6::prelude::WebViewExt;
 
-use crate::event::{IpcEvent, ReleaseServer, TokioEvent, UiCmd, UiEvent, WebCmd, WebEvent};
+use crate::event::{
+    AcquireServer, IpcEvent, ReleaseServer, TokioEvent, UiCmd, UiEvent, WebCmd, WebEvent,
+};
 
 mod event;
 mod ipc;
 mod webserver;
 mod webview;
 
-fn start_tokio(ui_tx: async_channel::Sender<UiCmd>, bg_rx: async_channel::Receiver<UiEvent>) {
+fn start_tokio(
+    ui_tx: async_channel::Sender<UiCmd>,
+    bg_rx: async_channel::Receiver<UiEvent>,
+    mut synx_rx: watch::Receiver<Arc<SyncData>>,
+) {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -60,10 +69,17 @@ fn start_tokio(ui_tx: async_channel::Sender<UiCmd>, bg_rx: async_channel::Receiv
                             Some(event) => {
                                 match event {
                                     TokioEvent::IpcEvent(ipc_event) => match ipc_event {
-                                        IpcEvent::AcquireServer(acquire_server) => {
-                                            info!(target: "tokio", acquire_server = ?acquire_server, "Received");
-                                            info!(target: "tokio", "Forwarding to webserver");
-                                            let _ = web_tx.send(WebCmd::AcquireServer(acquire_server));
+                                        IpcEvent::RequestServer(request_server) => {
+                                            info!(target: "tokio", request_server = ?request_server, "Received");
+                                            info!(target: "tokio", "Parsing to webserver");
+                                            let sync: Arc<SyncData> = synx_rx.borrow().clone();
+                                            for connector in sync.connectors.iter() {
+                                                let req = AcquireServer {
+                                                    path: request_server.path.clone(),
+                                                    connector: connector.clone(),
+                                                };
+                                                let _ = web_tx.send(WebCmd::AcquireServer(req));
+                                            }
                                         }
                                         IpcEvent::ReloadWebview(_reload_webview) => todo!(),
                                     },
@@ -111,19 +127,26 @@ fn main() -> glib::ExitCode {
     // Glib is sender
     let (bg_tx, bg_rx) = async_channel::unbounded::<UiEvent>();
 
+    // Synchronised data from the UI to tokio. Key is connector
+    let (sync_tx, sync_rx) = watch::channel(Arc::new(SyncData::default()));
+
     info!(target: "main", "Starting Tokio");
-    start_tokio(ui_tx, bg_rx);
+    start_tokio(ui_tx, bg_rx, sync_rx);
 
     // Run application, this function is not fn-once which is why we use
     // async channels over doing acrobatics for tokio's mpsc
     info!(target: "main", "Starting UI");
-    app.connect_startup(move |app| build_ui(app, bg_tx.clone(), ui_rx.clone()));
+    app.connect_startup(move |app| build_ui(app, bg_tx.clone(), ui_rx.clone(), sync_tx.clone()));
     app.run()
+}
+
+#[derive(Clone, Default)]
+struct SyncData {
+    connectors: Vec<String>,
 }
 
 struct Instance {
     webview: WebView,
-    connector: String,
     wallpaper_path: Option<String>,
 }
 
@@ -131,12 +154,15 @@ fn build_ui(
     app: &Application,
     bg_tx: async_channel::Sender<UiEvent>,
     ui_rx: async_channel::Receiver<UiCmd>,
+    sync_tx: watch::Sender<Arc<SyncData>>,
 ) {
     // Build one window+webview per monitor
     let display = gdk::Display::default().expect("No GDK display");
     let monitors: gio::ListModel = display.monitors();
 
-    let mut instances: Vec<Instance> = Vec::new();
+    // Key is the connector
+    let mut instances: HashMap<String, Instance> = HashMap::new();
+    let mut sync_data: SyncData = SyncData::default();
 
     for i in 0..monitors.n_items() {
         let monitor = monitors
@@ -149,12 +175,16 @@ fn build_ui(
         let connector = monitor.connector().unwrap_or_default().to_string();
 
         info!(target: "ui", connector = %connector, "Got Connector");
-        instances.push(Instance {
-            webview,
-            connector,
-            wallpaper_path: None,
-        });
+        instances.insert(
+            connector.clone(),
+            Instance {
+                webview,
+                wallpaper_path: None,
+            },
+        );
+        sync_data.connectors.push(connector);
     }
+    sync_tx.send(Arc::new(sync_data)).unwrap();
 
     // Receive loop on GTK thread
     glib::MainContext::default().spawn_local(async move {
@@ -163,31 +193,17 @@ fn build_ui(
             match event {
                 UiCmd::SetWebview(set_webview) => {
                     info!(target: "glib", set_webview = ?set_webview, "Received");
-                    if let Some(_monitor) = &set_webview.monitor {
-                        // TODO
-                        // for inst in &instances {
-                        //     // `connector()` exists on many setups; if not, use model/manufacturer/geometry
-                        //     if inst.connector == monitor {
-                        //         inst.webview.load_uri(&set_webview.url);
-                        //         break;
-                        //     }
-                        // }
-                    } else {
-                        for inst in &mut instances {
-                            let old_path: Option<String> = inst.wallpaper_path.clone();
-                            inst.wallpaper_path = set_webview.path.clone();
-                            if let Some(path) = old_path {
-                                let release_server = ReleaseServer { path };
-                                info!(target: "glib", release_server=?release_server, "Sending");
-                                let _ = bg_tx
-                                    .send(UiEvent::ReleaseServer(release_server))
-                                    .await;
-                                info!(target: "glib", "Finished Send");
-                            }
-                            inst.webview.load_uri(&set_webview.url);
-                            info!(target: "glib", url = %&set_webview.url, "Loaded")
-                        }
+                    let inst = instances.get_mut(&set_webview.connector).unwrap();
+                    let old_path: Option<String> = inst.wallpaper_path.clone();
+                    inst.wallpaper_path = set_webview.path.clone();
+                    if let Some(path) = old_path {
+                        let release_server = ReleaseServer { path };
+                        info!(target: "glib", release_server=?release_server, "Sending");
+                        let _ = bg_tx.send(UiEvent::ReleaseServer(release_server)).await;
+                        info!(target: "glib", "Finished Send");
                     }
+                    inst.webview.load_uri(&set_webview.url);
+                    info!(target: "glib", url = %&set_webview.url, "Loaded")
                 }
             }
         }

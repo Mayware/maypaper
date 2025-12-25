@@ -27,7 +27,7 @@ struct Cli {
 enum Cmd {
     Set {
         #[arg(long)]
-        monitor: Option<usize>,
+        monitor: Option<String>,
 
         #[arg(long, conflicts_with = "name", required = true)]
         uri: Option<String>,
@@ -37,7 +37,7 @@ enum Cmd {
     },
     Reload {
         #[arg(long)]
-        monitor: Option<usize>,
+        monitor: Option<String>,
     },
 }
 

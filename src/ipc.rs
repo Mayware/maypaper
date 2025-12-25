@@ -7,7 +7,7 @@ use tokio::{
 };
 use tracing::{error, info};
 
-use crate::event::{AcquireServer, Ipc, IpcEvent, TokioEvent};
+use crate::event::{AcquireServer, Ipc, IpcEvent, RequestServer, TokioEvent};
 
 pub async fn ipc_server(tx: mpsc::UnboundedSender<TokioEvent>) {
     let socket_path = get_default_socket_path();
@@ -51,12 +51,12 @@ pub async fn ipc_server(tx: mpsc::UnboundedSender<TokioEvent>) {
                             Ipc::Set { monitor, uri } => {
                                 info!(target: "ipc", "Received Set");
 
-                                let acquire_server = AcquireServer {
+                                let request_server = RequestServer {
                                     path: uri.clone(),
-                                    monitor: monitor.clone(),
+                                    connector: monitor.clone(),
                                 };
-                                info!(target: "ipc", acquire_server = ?acquire_server, "Sending");
-                                let _ = tx.send(TokioEvent::IpcEvent(IpcEvent::AcquireServer(acquire_server)));
+                                info!(target: "ipc", request_server = ?request_server, "Sending");
+                                let _ = tx.send(TokioEvent::IpcEvent(IpcEvent::RequestServer(request_server)));
                                 info!(target: "ipc", "Sent");
                             }
                             _ => {

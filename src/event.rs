@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Ipc {
-    Set { monitor: Option<usize>, uri: String },
-    Reload { monitor: Option<usize> },
+    Set { monitor: Option<String>, uri: String },
+    Reload { monitor: Option<String> },
 }
 
 
@@ -12,10 +12,16 @@ pub enum Ipc {
 * BASES
 */
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+pub struct RequestServer {
+    pub path: String,
+    pub connector: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct AcquireServer {
     pub path: String,
-    pub monitor: Option<usize>,
+    pub connector: String,
 }
 
 #[derive(Debug)]
@@ -27,7 +33,7 @@ pub struct ReleaseServer {
 pub struct SetWebview {
     pub(crate) url: String,
     pub(crate) path: Option<String>,
-    pub(crate) monitor: Option<usize>,
+    pub(crate) connector: String,
 }
 
 #[derive(Debug)]
@@ -45,7 +51,7 @@ pub enum TokioEvent {
 }
 
 pub enum IpcEvent {
-    AcquireServer(AcquireServer),
+    RequestServer(RequestServer),
     ReloadWebview(ReloadWebview),
 }
 

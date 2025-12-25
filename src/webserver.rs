@@ -39,7 +39,7 @@ pub async fn web_manager(
                     let set_webview = SetWebview {
                         url: inst.url.clone(),
                         path: Some(acquire.path.clone()),
-                        monitor: acquire.monitor,
+                        connector: acquire.connector,
                     };
 
                     info!(target: "web", set_webview = ?set_webview, "Sending");
@@ -88,7 +88,7 @@ pub async fn web_manager(
                 let set_webview = SetWebview {
                     url,
                     path: Some(acquire.path),
-                    monitor: acquire.monitor,
+                    connector: acquire.connector,
                 };
                 info!(target: "web", set_webview = ?set_webview, "Sending");
                 let _ = tx.send(TokioEvent::WebEvent(WebEvent::SetWebview(set_webview)));
@@ -108,7 +108,10 @@ pub async fn web_manager(
                             true
                         }
                     }
-                    None => false,
+                    None => {
+                        error!(target: "web", "Received a release request for a path that isn't served!");
+                        false
+                    }
                 };
 
                 if !should_shutdown {
