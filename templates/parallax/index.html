@@ -1,0 +1,666 @@
+<!doctype html>
+<html lang="en">
+<!--
+    Thanks to steel_93845 for the vertex / frag shader reference code.
+    Note that although I have looked over it, this was largely generated
+    by AI, and I am not a web developer.
+
+    If there are any inefficiencies, please let me know and contribute patches
+    if possible. With my testing, it is pretty efficient, especially compared to
+    alternatives.
+-->
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Maypaper</title>
+    <style>
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+            background: #000;
+            overflow: hidden;
+        }
+
+        canvas {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+            image-rendering: auto;
+        }
+
+        .hint {
+            position: fixed;
+            left: 12px;
+            bottom: 12px;
+            padding: 8px 10px;
+            font: 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+            color: #fff;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 10px;
+            user-select: none;
+            pointer-events: none;
+            white-space: pre;
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="c"></canvas>
+    <div id="hint" class="hint">Loading…</div>
+    <!doctype html>
+    <html lang="en">
+
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <title>Maypaper</title>
+        <style>
+            html,
+            body {
+                height: 100%;
+                margin: 0;
+                background: #000;
+                overflow: hidden;
+            }
+
+            canvas {
+                width: 100vw;
+                height: 100vh;
+                display: block;
+                image-rendering: auto;
+            }
+
+            .hint {
+                position: fixed;
+                left: 12px;
+                bottom: 12px;
+                padding: 8px 10px;
+                font: 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+                color: #fff;
+                background: rgba(0, 0, 0, 0.4);
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 10px;
+                user-select: none;
+                pointer-events: none;
+                white-space: pre;
+            }
+        </style>
+    </head>
+
+    <body>
+        <canvas id="c"></canvas>
+        <div id="hint" class="hint">Loading…</div>
+
+        <script type="module">
+            /**
+             * Fast Depth Parallax wallpaper
+             * - MIRRORED_REPEAT wrap mode (no shader-side mirroring math)
+             * - Coarse steps + binary refinement (big perf win)
+             * - Render scaling + FPS capping + pause when unfocused
+             * - grace period before dropping to idle/unfocused fps (including 0)
+             * - External control: globalThis.maypaper.setFocused(true/false)
+             */
+
+            const IMAGE_SRC = "{IMAGE}";
+            const DEPTH_SRC = "{IMAGE_DEPTH}";
+
+            const DEBUG = true;
+
+            const CONFIG_DEFAULTS = {
+                renderScale: 0.75,        // 1.0 native, 0.66/0.5 huge win
+                targetFps: 60,            // active fps cap
+                idleFps: 0,               // when idle (after grace). 0 = fully stop once settled
+                idleAfterMs: 350,         // ms after last mouse move to consider "idle"
+                pauseWhenUnfocused: true, // if true, unfocused can fully stop (after grace/settle)
+                unfocusedFps: 0,          // after grace. 0 = fully stop once settled
+
+                idleGraceMs: 1000,        // keep drawing for this long after becoming idle
+                idleGraceFps: 60,         // fps during the grace window
+                unfocusedGraceMs: 1000,   // keep drawing for this long after losing focus
+                unfocusedGraceFps: 60,    // fps during the grace window
+
+                settleFps: 30,            // fps while easing is still settling (after grace) when final fps = 0
+                settleEpsilon: 0.0012,    // how close sm must be to mx before we consider it "settled"
+
+                parallaxStrength: {PARALLAX_STRENGTH},
+                height: 0.20,
+                coarseSteps: 48,
+                refineSteps: 12,
+                mouseSmoothing: 0.08,
+
+                depthFilter: "linear",    // "nearest" faster but may shimmer
+                imageFilter: "linear",
+            };
+
+            function loadConfigFromQuery(defaults) {
+                const qs = new URLSearchParams(location.search);
+                const cfg = {...defaults};
+
+                const f = (k) => (qs.has(k) ? parseFloat(qs.get(k)) : null);
+                const i = (k) => (qs.has(k) ? parseInt(qs.get(k), 10) : null);
+                const b = (k) => (qs.has(k) ? (qs.get(k) === "1" || qs.get(k) === "true") : null);
+                const s = (k) => (qs.has(k) ? String(qs.get(k)) : null);
+
+                const scale = f("scale"); if (Number.isFinite(scale)) cfg.renderScale = Math.min(1, Math.max(0.25, scale));
+                const fps = i("fps"); if (Number.isFinite(fps)) cfg.targetFps = Math.min(240, Math.max(1, fps));
+                const idleFps = i("idleFps"); if (Number.isFinite(idleFps)) cfg.idleFps = Math.min(240, Math.max(0, idleFps));
+                const idleAfter = i("idleAfter"); if (Number.isFinite(idleAfter)) cfg.idleAfterMs = Math.min(10_000, Math.max(0, idleAfter));
+                const pause = b("pause"); if (pause !== null) cfg.pauseWhenUnfocused = pause;
+                const unfps = i("unfocusedFps"); if (Number.isFinite(unfps)) cfg.unfocusedFps = Math.min(240, Math.max(0, unfps));
+
+                const coarse = i("coarse"); if (Number.isFinite(coarse)) cfg.coarseSteps = Math.min(128, Math.max(1, coarse));
+                const refine = i("refine"); if (Number.isFinite(refine)) cfg.refineSteps = Math.min(32, Math.max(0, refine));
+                const height = f("height"); if (Number.isFinite(height)) cfg.height = Math.min(0.5, Math.max(0.0, height));
+                const strength = f("strength"); if (Number.isFinite(strength)) cfg.parallaxStrength = Math.min(0.25, Math.max(0.0, strength));
+                const smooth = f("smooth"); if (Number.isFinite(smooth)) cfg.mouseSmoothing = Math.min(1.0, Math.max(0.0, smooth));
+                const df = s("depthFilter"); if (df) cfg.depthFilter = df.toLowerCase();
+                const imf = s("imageFilter"); if (imf) cfg.imageFilter = imf.toLowerCase();
+
+                // grace + settle knobs
+                const igm = i("idleGraceMs"); if (Number.isFinite(igm)) cfg.idleGraceMs = Math.min(60_000, Math.max(0, igm));
+                const igf = i("idleGraceFps"); if (Number.isFinite(igf)) cfg.idleGraceFps = Math.min(240, Math.max(1, igf));
+                const ugm = i("unfocusedGraceMs"); if (Number.isFinite(ugm)) cfg.unfocusedGraceMs = Math.min(60_000, Math.max(0, ugm));
+                const ugf = i("unfocusedGraceFps"); if (Number.isFinite(ugf)) cfg.unfocusedGraceFps = Math.min(240, Math.max(1, ugf));
+                const sf = i("settleFps"); if (Number.isFinite(sf)) cfg.settleFps = Math.min(240, Math.max(1, sf));
+                const se = f("settleEps"); if (Number.isFinite(se)) cfg.settleEpsilon = Math.min(1.0, Math.max(0.0, se));
+
+                return cfg;
+            }
+
+            const CONFIG = loadConfigFromQuery(CONFIG_DEFAULTS);
+
+            const hintEl = document.getElementById("hint");
+            if (!DEBUG) hintEl.style.display = "none";
+
+            const canvas = document.getElementById("c");
+            const gl = canvas.getContext("webgl2", {antialias: false, alpha: false, depth: false, stencil: false});
+            if (!gl) {
+                document.body.innerHTML = "<p style='color:white;padding:20px'>WebGL2 not supported.</p>";
+                throw new Error("WebGL2 not supported");
+            }
+
+            gl.disable(gl.DEPTH_TEST);
+            gl.disable(gl.BLEND);
+
+            // --- Shaders ---
+            const vertSrc = `#version 300 es
+precision highp float;
+out vec2 vUV;
+void main() {
+  vec2 pos;
+  if (gl_VertexID == 0) pos = vec2(-1.0, -1.0);
+  else if (gl_VertexID == 1) pos = vec2( 3.0, -1.0);
+  else pos = vec2(-1.0,  3.0);
+  gl_Position = vec4(pos, 0.0, 1.0);
+  vUV = pos * 0.5 + 0.5;
+}
+`;
+
+            const fragSrc = `#version 300 es
+precision highp float;
+
+in vec2 vUV;
+out vec4 fragColor;
+
+uniform sampler2D uSource;
+uniform sampler2D uDepth;
+
+uniform float uOffsetX;
+uniform float uOffsetY;
+uniform float uParallaxStrength;
+
+uniform float uImgAspect;
+uniform float uCanvasAspect;
+uniform float uOpacity;
+
+uniform float uHeight;
+uniform int uCoarseSteps;
+uniform int uRefineSteps;
+
+vec2 uv_cover(vec2 uv, float canvasAspect, float imgAspect) {
+  vec2 scale = vec2(1.0);
+  if (canvasAspect > imgAspect) scale.y = imgAspect / canvasAspect;
+  else scale.x = canvasAspect / imgAspect;
+  return (uv - 0.5) * scale + 0.5;
+}
+
+vec2 uv2gluv(vec2 uv, float aspect) {
+  return vec2((uv.x * 2.0 - 1.0) * aspect, (uv.y * 2.0 - 1.0));
+}
+vec2 gluv2uv(vec2 gluv, float aspect) {
+  return vec2((gluv.x / aspect + 1.0) * 0.5, (gluv.y + 1.0) * 0.5);
+}
+
+vec2 depthFlowFast(vec2 gluv, vec2 offset, float aspect) {
+  float height = uHeight;
+  float safe = 1.0 - height;
+
+  vec3 rayOrigin = vec3(gluv, 0.0);
+  vec3 intersect = vec3(gluv, 1.0) - vec3(offset, 0.0);
+
+  float t = 0.0;
+  float step = 1.0 / float(max(uCoarseSteps, 1));
+  float tPrev = 0.0;
+
+  bool hit = false;
+  float tHit = 1.0;
+
+  const int MAX_COARSE = 128;
+  const int MAX_REFINE = 32;
+
+  for (int i = 0; i < MAX_COARSE; i++) {
+    if (i >= uCoarseSteps) break;
+    tPrev = t;
+    t += step;
+
+    float s = mix(safe, 1.0, t);
+    vec3 point = mix(rayOrigin, intersect, s);
+
+    vec2 sampleUV = gluv2uv(point.xy, aspect);
+    float depthValue = texture(uDepth, sampleUV).r;
+
+    float surface = height * depthValue;
+    float ceiling = 1.0 - point.z;
+
+    if (ceiling < surface) {
+      hit = true;
+      tHit = t;
+      break;
+    }
+  }
+
+  if (!hit || uRefineSteps == 0) {
+    float s = mix(safe, 1.0, hit ? tHit : 1.0);
+    vec3 point = mix(rayOrigin, intersect, s);
+    return point.xy;
+  }
+
+  float lo = tPrev;
+  float hi = tHit;
+
+  for (int j = 0; j < MAX_REFINE; j++) {
+    if (j >= uRefineSteps) break;
+    float mid = 0.5 * (lo + hi);
+
+    float s = mix(safe, 1.0, mid);
+    vec3 point = mix(rayOrigin, intersect, s);
+
+    vec2 sampleUV = gluv2uv(point.xy, aspect);
+    float depthValue = texture(uDepth, sampleUV).r;
+
+    float surface = height * depthValue;
+    float ceiling = 1.0 - point.z;
+
+    if (ceiling < surface) hi = mid;
+    else lo = mid;
+  }
+
+  float s = mix(safe, 1.0, hi);
+  vec3 point = mix(rayOrigin, intersect, s);
+  return point.xy;
+}
+
+void main() {
+  vec2 uv = uv_cover(vUV, uCanvasAspect, uImgAspect);
+  vec2 gluv = uv2gluv(uv, uImgAspect);
+  vec2 offset = vec2(uOffsetX, -uOffsetY) * uParallaxStrength;
+
+  vec2 finalGluv = depthFlowFast(gluv, offset, uImgAspect);
+  vec2 finalUV = gluv2uv(finalGluv, uImgAspect); // MIRRORED_REPEAT handles edges
+
+  vec4 c = texture(uSource, finalUV);
+  c.a *= uOpacity;
+  fragColor = c;
+}
+`;
+
+            // --- Compile/link helpers ---
+            function compileShader(type, src) {
+                const sh = gl.createShader(type);
+                gl.shaderSource(sh, src);
+                gl.compileShader(sh);
+                if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+                    const log = gl.getShaderInfoLog(sh);
+                    gl.deleteShader(sh);
+                    throw new Error(log);
+                }
+                return sh;
+            }
+            function createProgram(vsSrc, fsSrc) {
+                const vs = compileShader(gl.VERTEX_SHADER, vsSrc);
+                const fs = compileShader(gl.FRAGMENT_SHADER, fsSrc);
+                const prog = gl.createProgram();
+                gl.attachShader(prog, vs);
+                gl.attachShader(prog, fs);
+                gl.linkProgram(prog);
+                gl.deleteShader(vs);
+                gl.deleteShader(fs);
+                if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+                    const log = gl.getProgramInfoLog(prog);
+                    gl.deleteProgram(prog);
+                    throw new Error(log);
+                }
+                return prog;
+            }
+
+            const program = createProgram(vertSrc, fragSrc);
+            gl.useProgram(program);
+
+            const loc = {
+                uSource: gl.getUniformLocation(program, "uSource"),
+                uDepth: gl.getUniformLocation(program, "uDepth"),
+                uOffsetX: gl.getUniformLocation(program, "uOffsetX"),
+                uOffsetY: gl.getUniformLocation(program, "uOffsetY"),
+                uParallaxStrength: gl.getUniformLocation(program, "uParallaxStrength"),
+                uImgAspect: gl.getUniformLocation(program, "uImgAspect"),
+                uCanvasAspect: gl.getUniformLocation(program, "uCanvasAspect"),
+                uOpacity: gl.getUniformLocation(program, "uOpacity"),
+                uHeight: gl.getUniformLocation(program, "uHeight"),
+                uCoarseSteps: gl.getUniformLocation(program, "uCoarseSteps"),
+                uRefineSteps: gl.getUniformLocation(program, "uRefineSteps"),
+            };
+
+            function glFilter(name) {
+                return String(name).toLowerCase() === "nearest" ? gl.NEAREST : gl.LINEAR;
+            }
+
+            function createTextureFromImage(img, {wrap = gl.MIRRORED_REPEAT, minFilter = gl.LINEAR, magFilter = gl.LINEAR} = {}) {
+                const tex = gl.createTexture();
+                gl.bindTexture(gl.TEXTURE_2D, tex);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minFilter);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magFilter);
+                gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+                gl.bindTexture(gl.TEXTURE_2D, null);
+                return tex;
+            }
+
+            function loadImage(url) {
+                return new Promise((resolve, reject) => {
+                    const img = new Image();
+                    img.decoding = "async";
+                    img.loading = "eager";
+                    img.crossOrigin = "anonymous";
+                    img.onload = () => resolve(img);
+                    img.onerror = () => reject(new Error("Failed to load " + url));
+                    img.src = url;
+                });
+            }
+
+            // Resize only when needed
+            let lastW = 0, lastH = 0;
+            function resizeIfNeeded() {
+                const dpr = Math.max(1, window.devicePixelRatio || 1);
+                const scale = CONFIG.renderScale;
+                const w = Math.floor(canvas.clientWidth * dpr * scale);
+                const h = Math.floor(canvas.clientHeight * dpr * scale);
+
+                if (w !== lastW || h !== lastH) {
+                    lastW = w; lastH = h;
+                    canvas.width = w;
+                    canvas.height = h;
+                    gl.viewport(0, 0, w, h);
+                    gl.uniform1f(loc.uCanvasAspect, w / h);
+                }
+            }
+            window.addEventListener("resize", () => resizeIfNeeded());
+
+            // Mouse input
+            let mx = 0, my = 0;
+            let lastInputMs = performance.now();
+
+            // Smoothed mouse
+            let smx = 0, smy = 0;
+
+            // Track when we *entered* idle/unfocused so we can apply grace timers
+            let idleSinceMs = null;
+            let unfocusedSinceMs = null;
+
+            // Focus/pause control
+            let focused = true;
+            let rafId = 0;
+            let lastDrawMs = 0;
+            let lastFocusedSetMs = performance.now();
+
+            function isSettled() {
+                const dx = mx - smx;
+                const dy = my - smy;
+                return (Math.abs(dx) + Math.abs(dy)) <= CONFIG.settleEpsilon;
+            }
+
+            function currentFpsCap(nowMs) {
+                // Update idleSinceMs bookkeeping
+                const idle = (nowMs - lastInputMs) >= CONFIG.idleAfterMs;
+                if (idle) {
+                    if (idleSinceMs === null) idleSinceMs = nowMs;
+                } else {
+                    idleSinceMs = null;
+                }
+
+                // Unfocused path
+                if (!focused) {
+                    if (unfocusedSinceMs === null) unfocusedSinceMs = nowMs;
+                    const unfocusedAge = nowMs - unfocusedSinceMs;
+
+                    // Grace window while unfocused
+                    if (unfocusedAge < CONFIG.unfocusedGraceMs) return CONFIG.unfocusedGraceFps;
+
+                    // After grace: honor unfocusedFps, but if it's 0 we still need a few frames to finish easing
+                    if (CONFIG.unfocusedFps > 0) return CONFIG.unfocusedFps;
+                    return isSettled() ? 0 : CONFIG.settleFps;
+                }
+
+                // Focused path: reset unfocused timer
+                unfocusedSinceMs = null;
+
+                // Active (not idle)
+                if (!idle) return CONFIG.targetFps;
+
+                // Grace window while idle
+                const idleAge = nowMs - idleSinceMs;
+                if (idleAge < CONFIG.idleGraceMs) return CONFIG.idleGraceFps;
+
+                // After grace: honor idleFps, but if it's 0 we still need a few frames to finish easing
+                if (CONFIG.idleFps > 0) return CONFIG.idleFps;
+                return isSettled() ? 0 : CONFIG.settleFps;
+            }
+
+            function ensureRafRunning() {
+                if (!rafId) {
+                    lastDrawMs = 0;
+                    rafId = requestAnimationFrame(frame);
+                }
+            }
+
+            function stopRaf() {
+                if (rafId) cancelAnimationFrame(rafId);
+                rafId = 0;
+            }
+
+            window.addEventListener("pointermove", (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const x = (e.clientX - rect.left) / rect.width;
+                const y = (e.clientY - rect.top) / rect.height;
+                mx = (x * 2 - 1);
+                my = (y * 2 - 1);
+                lastInputMs = performance.now();
+
+                // If we were fully paused (fps=0 and RAF stopped), wake up
+                ensureRafRunning();
+            });
+
+            // External API (callable from Rust via evaluate_javascript)
+            globalThis.maypaper = {
+                setFocused(v) {setFocused(!!v);},
+                dump() {return dumpState(performance.now());},
+            };
+
+            function setFocused(v) {
+                focused = v;
+                lastFocusedSetMs = performance.now();
+
+                // When unfocused, we *do not* immediately cancel RAF anymore.
+                // We let the grace/settle logic run, then it will stop itself once settled.
+                if (!focused) {
+                    unfocusedSinceMs = performance.now();
+                    ensureRafRunning();
+                    return;
+                }
+
+                // Focused: reset timers and ensure running
+                unfocusedSinceMs = null;
+                ensureRafRunning();
+            }
+
+            document.addEventListener("visibilitychange", () => {
+                setFocused(!document.hidden);
+            });
+            window.addEventListener("focus", () => setFocused(true));
+            window.addEventListener("blur", () => setFocused(false));
+
+            // Debug output
+            function fmt(n, d = 3) {
+                return Number.isFinite(n) ? n.toFixed(d) : String(n);
+            }
+
+            function dumpState(nowMs) {
+                const idle = (nowMs - lastInputMs) >= CONFIG.idleAfterMs;
+                const fpsCap = currentFpsCap(nowMs);
+
+                const idleAge = idleSinceMs === null ? null : Math.floor(nowMs - idleSinceMs);
+                const unfAge = unfocusedSinceMs === null ? null : Math.floor(nowMs - unfocusedSinceMs);
+
+                const idleGrace = idle && idleSinceMs !== null && (nowMs - idleSinceMs) < CONFIG.idleGraceMs;
+                const unfGrace = (!focused) && unfocusedSinceMs !== null && (nowMs - unfocusedSinceMs) < CONFIG.unfocusedGraceMs;
+
+                const pausedHard = (fpsCap === 0);
+                const state =
+                    !focused ? (unfGrace ? "UNFOCUSED (grace)" : (pausedHard ? "UNFOCUSED (paused)" : "UNFOCUSED"))
+                        : idle ? (idleGrace ? "IDLE (grace)" : (pausedHard ? "IDLE (paused)" : "IDLE"))
+                            : "RUN";
+
+                return `== maypaper debug ==
+state=${state}
+focused=${focused} rafRunning=${rafId ? "yes" : "no"}
+focusedLastSetAgoMs=${Math.floor(nowMs - lastFocusedSetMs)}
+fpsCap=${fpsCap} target=${CONFIG.targetFps} idleFps=${CONFIG.idleFps} unfocusedFps=${CONFIG.unfocusedFps}
+idleAfterMs=${CONFIG.idleAfterMs} idle=${idle} inputAgeMs=${Math.floor(nowMs - lastInputMs)}
+idleSinceMs=${idleSinceMs === null ? "null" : idleAge}
+unfocusedSinceMs=${unfocusedSinceMs === null ? "null" : unfAge}
+
+idleGraceMs=${CONFIG.idleGraceMs} idleGraceFps=${CONFIG.idleGraceFps}
+unfocusedGraceMs=${CONFIG.unfocusedGraceMs} unfocusedGraceFps=${CONFIG.unfocusedGraceFps}
+settleFps=${CONFIG.settleFps} settleEpsilon=${CONFIG.settleEpsilon} settled=${isSettled()}
+
+renderScale=${CONFIG.renderScale} dpr=${fmt(window.devicePixelRatio || 1, 2)}
+canvasPx=${canvas.width}x${canvas.height} canvasAspect=${fmt(canvas.width / canvas.height, 4)}
+
+imgAspect=${fmt(IMG_ASPECT, 4)}
+parallaxStrength=${CONFIG.parallaxStrength} height=${CONFIG.height}
+coarseSteps=${CONFIG.coarseSteps} refineSteps=${CONFIG.refineSteps}
+mouseSmoothing=${CONFIG.mouseSmoothing}
+
+mouse raw=(${fmt(mx, 3)}, ${fmt(my, 3)})
+mouse sm =(${fmt(smx, 3)}, ${fmt(smy, 3)})
+
+filters img=${CONFIG.imageFilter} depth=${CONFIG.depthFilter}
+wrap=MIRRORED_REPEAT`;
+            }
+
+            let IMG_ASPECT = 1.0;
+
+            function frame(nowMs) {
+                // schedule next frame (we may cancel it if we decide to fully pause)
+                rafId = requestAnimationFrame(frame);
+
+                resizeIfNeeded();
+
+                // FPS cap with grace + settle
+                const fps = currentFpsCap(nowMs);
+
+                // If fps==0: we're "fully paused". Cancel RAF so CPU/GPU go quiet.
+                if (fps <= 0) {
+                    if (DEBUG) hintEl.textContent = dumpState(nowMs);
+                    stopRaf(); // cancels the next scheduled frame
+                    return;
+                }
+
+                const interval = 1000 / fps;
+                if ((nowMs - lastDrawMs) < interval) {
+                    if (DEBUG) hintEl.textContent = dumpState(nowMs);
+                    return;
+                }
+                lastDrawMs = nowMs;
+
+                // smoothing (exponential ease; this is your "tween to stop")
+                const a = CONFIG.mouseSmoothing;
+                if (a <= 0.0) {
+                    smx = mx; smy = my;
+                } else {
+                    smx += (mx - smx) * a;
+                    smy += (my - smy) * a;
+                }
+
+                gl.uniform1f(loc.uOffsetX, smx);
+                gl.uniform1f(loc.uOffsetY, smy);
+
+                gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+                if (DEBUG) hintEl.textContent = dumpState(nowMs);
+            }
+
+            (async function main() {
+                const [img, depthImg] = await Promise.all([
+                    loadImage(IMAGE_SRC),
+                    loadImage(DEPTH_SRC),
+                ]);
+
+                const texSource = createTextureFromImage(img, {
+                    wrap: gl.MIRRORED_REPEAT,
+                    minFilter: glFilter(CONFIG.imageFilter),
+                    magFilter: glFilter(CONFIG.imageFilter),
+                });
+
+                const texDepth = createTextureFromImage(depthImg, {
+                    wrap: gl.MIRRORED_REPEAT,
+                    minFilter: glFilter(CONFIG.depthFilter),
+                    magFilter: glFilter(CONFIG.depthFilter),
+                });
+
+                gl.useProgram(program);
+
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, texSource);
+                gl.uniform1i(loc.uSource, 0);
+
+                gl.activeTexture(gl.TEXTURE1);
+                gl.bindTexture(gl.TEXTURE_2D, texDepth);
+                gl.uniform1i(loc.uDepth, 1);
+
+                gl.uniform1f(loc.uOpacity, 1.0);
+                gl.uniform1f(loc.uParallaxStrength, CONFIG.parallaxStrength);
+                gl.uniform1f(loc.uHeight, CONFIG.height);
+                gl.uniform1i(loc.uCoarseSteps, CONFIG.coarseSteps);
+                gl.uniform1i(loc.uRefineSteps, CONFIG.refineSteps);
+
+                IMG_ASPECT = img.naturalWidth / img.naturalHeight;
+                gl.uniform1f(loc.uImgAspect, IMG_ASPECT);
+
+                resizeIfNeeded();
+
+                if (DEBUG) hintEl.textContent = dumpState(performance.now());
+                ensureRafRunning();
+            })().catch(err => {
+                console.error(err);
+                document.body.innerHTML =
+                    `<pre style="color:white;padding:16px;white-space:pre-wrap">${err.stack || err}</pre>`;
+            });
+        </script>
+    </body>
+
+    </html>

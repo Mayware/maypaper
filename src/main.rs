@@ -223,7 +223,10 @@ fn build_ui(
             match event {
                 UiCmd::SetWebview(set_webview) => {
                     debug!(target: "glib", set_webview = ?set_webview, "Received");
-                    let inst = instances.get_mut(&set_webview.connector).unwrap();
+                    let inst = instances.get_mut(&set_webview.connector).unwrap(); // TODO - WE
+                                                                                   // DON'T KNOW IF
+                                                                                   // THIS WILL
+                                                                                   // FAIL!
                     let old_path: Option<String> = inst.wallpaper_path.clone();
                     inst.wallpaper_path = set_webview.path.clone();
                     if let Some(path) = old_path {
