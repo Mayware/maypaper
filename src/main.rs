@@ -10,12 +10,13 @@ use gtk4::gio::prelude::ListModelExt;
 use gtk4::{gdk, gio};
 
 use tokio::sync::{mpsc, watch};
-use tracing::info;
+use tracing::{debug, info};
 use webkit6::WebView;
 use webkit6::prelude::WebViewExt;
 
 use crate::event::{
-    AcquireServer, IpcEvent, ReleaseServer, TokioEvent, UiCmd, UiEvent, WebCmd, WebEvent,
+    AcquireServer, IpcEvent, ReleaseServer, SetWebview, TokioEvent, UiCmd, UiEvent, WebCmd,
+    WebEvent,
 };
 
 mod event;
@@ -26,7 +27,7 @@ mod webview;
 fn start_tokio(
     ui_tx: async_channel::Sender<UiCmd>,
     bg_rx: async_channel::Receiver<UiEvent>,
-    mut synx_rx: watch::Receiver<Arc<SyncData>>,
+    synx_rx: watch::Receiver<Arc<SyncData>>,
 ) {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -49,13 +50,13 @@ fn start_tokio(
             loop {
                 tokio::select! {
                     bg = bg_rx.recv() => {
-                        info!(target: "tokio", "Received an event from glib");
+                        debug!(target: "tokio", "Received an event from glib");
                         match bg {
                             Ok(event) => {
                                 match event {
                                     UiEvent::ReleaseServer(release_server) => {
-                                        info!(target: "tokio", release_server = ?release_server, "Received");
-                                        info!(target: "tokio", "Forwarding to webserver");
+                                        debug!(target: "tokio", release_server = ?release_server, "Received");
+                                        debug!(target: "tokio", "Forwarding to webserver");
                                         let _ = web_tx.send(WebCmd::ReleaseServer(release_server));
                                     },
                                 }
@@ -70,23 +71,51 @@ fn start_tokio(
                                 match event {
                                     TokioEvent::IpcEvent(ipc_event) => match ipc_event {
                                         IpcEvent::RequestServer(request_server) => {
-                                            info!(target: "tokio", request_server = ?request_server, "Received");
-                                            info!(target: "tokio", "Parsing to webserver");
-                                            let sync: Arc<SyncData> = synx_rx.borrow().clone();
-                                            for connector in sync.connectors.iter() {
-                                                let req = AcquireServer {
+                                            debug!(target: "tokio", request_server = ?request_server, "Received");
+                                            debug!(target: "tokio", "Parsing to webserver");
+                                            if request_server.connector.is_some() {
+                                                let acquire = AcquireServer {
                                                     path: request_server.path.clone(),
-                                                    connector: connector.clone(),
+                                                    connector: request_server.connector.unwrap(),
                                                 };
-                                                let _ = web_tx.send(WebCmd::AcquireServer(req));
+                                                let _ = web_tx.send(WebCmd::AcquireServer(acquire));
+                                            } else {
+                                                let sync: Arc<SyncData> = synx_rx.borrow().clone();
+                                                for connector in sync.connectors.iter() {
+                                                    let acquire = AcquireServer {
+                                                        path: request_server.path.clone(),
+                                                        connector: connector.clone(),
+                                                    };
+                                                    let _ = web_tx.send(WebCmd::AcquireServer(acquire));
+                                                }
+                                            }
+                                        },
+                                        IpcEvent::RequestWebview(request_webview) => {
+                                            debug!(target: "tokio", request_webview = ?request_webview, "Received");
+                                            if request_webview.connector.is_some() {
+                                                let set_webview = SetWebview {
+                                                    url: request_webview.url,
+                                                    path: None,
+                                                    connector: request_webview.connector.unwrap(),
+                                                };
+                                                let _ = ui_tx.send(UiCmd::SetWebview(set_webview)).await;
+                                            } else {
+                                                let sync: Arc<SyncData> = synx_rx.borrow().clone();
+                                                for connector in sync.connectors.iter() {
+                                                    let set_webview = SetWebview {
+                                                        url: request_webview.url.clone(),
+                                                        path: None,
+                                                        connector: connector.clone(),
+                                                    };
+                                                    let _ = ui_tx.send(UiCmd::SetWebview(set_webview)).await;
+                                                }
                                             }
                                         }
-                                        IpcEvent::ReloadWebview(_reload_webview) => todo!(),
                                     },
                                     TokioEvent::WebEvent(web_event) => match web_event {
                                         WebEvent::SetWebview(set_webview) => {
-                                            info!(target: "tokio", set_webview = ?set_webview, "Received");
-                                            info!(target: "tokio", "Forwarding to glib");
+                                            debug!(target: "tokio", set_webview = ?set_webview, "Received");
+                                            debug!(target: "tokio", "Forwarding to glib");
                                             let _ = ui_tx.send(UiCmd::SetWebview(set_webview)).await;
                                         }
                                     },
@@ -137,6 +166,7 @@ fn main() -> glib::ExitCode {
     // async channels over doing acrobatics for tokio's mpsc
     info!(target: "main", "Starting UI");
     app.connect_startup(move |app| build_ui(app, bg_tx.clone(), ui_rx.clone(), sync_tx.clone()));
+    app.connect_activate(|_app| {}); // Empty handler to suppress glib warning
     app.run()
 }
 
@@ -189,25 +219,25 @@ fn build_ui(
     // Receive loop on GTK thread
     glib::MainContext::default().spawn_local(async move {
         while let Ok(event) = ui_rx.recv().await {
-            info!(target: "glib", "Received an event from tokio");
+            debug!(target: "glib", "Received an event from tokio");
             match event {
                 UiCmd::SetWebview(set_webview) => {
-                    info!(target: "glib", set_webview = ?set_webview, "Received");
+                    debug!(target: "glib", set_webview = ?set_webview, "Received");
                     let inst = instances.get_mut(&set_webview.connector).unwrap();
                     let old_path: Option<String> = inst.wallpaper_path.clone();
                     inst.wallpaper_path = set_webview.path.clone();
                     if let Some(path) = old_path {
                         let release_server = ReleaseServer { path };
-                        info!(target: "glib", release_server=?release_server, "Sending");
+                        debug!(target: "glib", release_server=?release_server, "Sending");
                         let _ = bg_tx.send(UiEvent::ReleaseServer(release_server)).await;
-                        info!(target: "glib", "Finished Send");
+                        debug!(target: "glib", "Finished Send");
                     }
                     inst.webview.load_uri(&set_webview.url);
-                    info!(target: "glib", url = %&set_webview.url, "Loaded")
+                    debug!(target: "glib", url = %&set_webview.url, "Loaded")
                 }
             }
         }
 
-        info!("IPC channel closed");
+        debug!("IPC channel closed");
     });
 }

@@ -3,10 +3,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Ipc {
-    Set { monitor: Option<String>, uri: String },
-    Reload { monitor: Option<String> },
+    SetPath { monitor: Option<String>, path: String },
+    SetUrl { monitor: Option<String>, url: String },
 }
-
 
 /*
 * BASES
@@ -26,19 +25,20 @@ pub struct AcquireServer {
 
 #[derive(Debug)]
 pub struct ReleaseServer {
-    pub(crate) path: String,
+    pub path: String,
+}
+
+#[derive(Debug)]
+pub struct RequestWebview {
+    pub url: String,
+    pub connector: Option<String>, 
 }
 
 #[derive(Debug)]
 pub struct SetWebview {
-    pub(crate) url: String,
-    pub(crate) path: Option<String>,
-    pub(crate) connector: String,
-}
-
-#[derive(Debug)]
-pub struct ReloadWebview {
-    monitor: Option<usize>,
+    pub url: String,
+    pub path: Option<String>,
+    pub connector: String,
 }
 
 /*
@@ -52,7 +52,7 @@ pub enum TokioEvent {
 
 pub enum IpcEvent {
     RequestServer(RequestServer),
-    ReloadWebview(ReloadWebview),
+    RequestWebview(RequestWebview)
 }
 
 pub enum WebEvent {
@@ -68,7 +68,7 @@ pub enum UiEvent {
 * CMDS
 */
 
-pub(crate) enum UiCmd {
+pub enum UiCmd {
     SetWebview(SetWebview),
 }
 

@@ -29,15 +29,11 @@ enum Cmd {
         #[arg(long)]
         monitor: Option<String>,
 
-        #[arg(long, conflicts_with = "name", required = true)]
-        uri: Option<String>,
+        #[arg(long, conflicts_with = "path", required = true)]
+        url: Option<String>,
 
-        #[arg(long, conflicts_with = "uri", required = true)]
-        name: Option<String>,
-    },
-    Reload {
-        #[arg(long)]
-        monitor: Option<String>,
+        #[arg(long, conflicts_with = "url", required = true)]
+        path: Option<String>,
     },
 }
 
@@ -61,15 +57,13 @@ fn main() -> Result<()> {
     let socket_path = cli.socket.unwrap_or_else(get_default_socket_path);
 
     let msg = match cli.cmd {
-        Cmd::Set { monitor, uri, name } => Ipc::Set {
-            monitor,
-            uri: if uri.is_some() {
-                uri.unwrap()
+        Cmd::Set { monitor, url, path } => {
+            if path.is_some() {
+                Ipc::SetPath { monitor, path: path.unwrap() }
             } else {
-                format!("file://{}/{}/index.html", paths.wallpapers.display(), name.unwrap())
-            },
-        },
-        Cmd::Reload { monitor } => Ipc::Reload { monitor },
+                Ipc::SetUrl { monitor, url: url.unwrap() }
+            }
+        }
     };
 
     if let Err(e) = send_msg(&socket_path, &msg) {

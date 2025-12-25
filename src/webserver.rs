@@ -8,7 +8,7 @@ use tokio::{
 use axum::{Router, routing::get};
 use tower::ServiceBuilder;
 use tower_http::{services::ServeDir, trace::TraceLayer};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::event::{SetWebview, TokioEvent, WebCmd, WebEvent};
 
@@ -27,10 +27,10 @@ pub async fn web_manager(
     let mut instances: HashMap<String, Instance> = HashMap::new();
 
     while let Some(cmd) = rx.recv().await {
-        info!(target: "web", "Received a cmd from tokio");
+        debug!(target: "web", "Received a cmd from tokio");
         match cmd {
             WebCmd::AcquireServer(acquire) => {
-                info!(target: "web", acquire = ?acquire, "Received");
+                debug!(target: "web", acquire = ?acquire, "Received");
 
                 if let Some(inst) = instances.get_mut(&acquire.path) {
                     inst.watchers += 1;
@@ -42,11 +42,12 @@ pub async fn web_manager(
                         connector: acquire.connector,
                     };
 
-                    info!(target: "web", set_webview = ?set_webview, "Sending");
+                    debug!(target: "web", set_webview = ?set_webview, "Sending");
                     let _ = tx.send(TokioEvent::WebEvent(WebEvent::SetWebview(set_webview)));
-                    info!(target: "web", "Sent");
+                    debug!(target: "web", "Sent");
                     continue;
                 }
+                info!(target: "web", "Did not find existing webserver");
 
                 let listener = match TcpListener::bind(("127.0.0.1", 0)).await {
                     Ok(l) => l,
@@ -70,7 +71,7 @@ pub async fn web_manager(
 
                 // A tiny race condition, I doubt it will cause any issues, if it does we'll change
                 let path_for_task = acquire.path.clone();
-                info!(target: "web", path = path_for_task, "Spawning webserver task");
+                debug!(target: "web", path = path_for_task, "Spawning webserver task");
                 tokio::spawn(async move {
                     run_web(listener, path_for_task, shutdown_rx).await;
                 });
@@ -83,26 +84,26 @@ pub async fn web_manager(
                         shutdown: shutdown_tx,
                     },
                 );
-                info!(target: "web", instances = ?instances, "Current instances");
+                debug!(target: "web", instances = ?instances, "Current instances");
 
                 let set_webview = SetWebview {
                     url,
                     path: Some(acquire.path),
                     connector: acquire.connector,
                 };
-                info!(target: "web", set_webview = ?set_webview, "Sending");
+                debug!(target: "web", set_webview = ?set_webview, "Sending");
                 let _ = tx.send(TokioEvent::WebEvent(WebEvent::SetWebview(set_webview)));
-                info!(target: "web", "Sent")
+                debug!(target: "web", "Sent")
             }
 
             WebCmd::ReleaseServer(release) => {
-                info!(target: "web", release = ?release, "Received");
+                debug!(target: "web", release = ?release, "Received");
 
                 let should_shutdown = match instances.get_mut(&release.path) {
                     Some(inst) => {
                         if inst.watchers > 1 {
                             inst.watchers -= 1;
-                            info!(target: "web", watchers = %inst.watchers, "Not removing, still watched");
+                            info!(target: "web", path = %release.path, watchers = %inst.watchers, "Not removing, still watched");
                             false
                         } else {
                             true
@@ -120,7 +121,7 @@ pub async fn web_manager(
 
                 // There are no longer any watchers
                 if let Some(inst) = instances.remove(&release.path) {
-                    info!(target: "web", "No watchers, attempting to shutdown");
+                    info!(target: "web", path = %release.path, "No watchers, attempting to shutdown");
                     let _ = inst.shutdown.send(());
                 }
             }

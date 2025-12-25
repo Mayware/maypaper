@@ -6,7 +6,7 @@ use gtk4::{gdk, gio};
 
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
-use tracing::{error, info};
+use tracing::{debug, error};
 use webkit6::prelude::WebViewExt;
 use webkit6::{LoadEvent, NetworkSession, WebView};
 
@@ -85,7 +85,7 @@ pub fn attach_load_handlers(webview: &WebView, idx: u32) {
     // Useful for logging successful finishes too
     webview.connect_load_changed(move |_wv, event| {
         if event == LoadEvent::Finished {
-            info!(target: "webview", idx = %idx, event = ?event, "Load changed");
+            debug!(target: "webview", idx = %idx, event = ?event, "Load changed");
         }
     });
 }

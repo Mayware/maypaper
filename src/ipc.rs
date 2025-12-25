@@ -1,13 +1,13 @@
+use maypaper::get_default_socket_path;
 use tokio::sync::mpsc;
 
-use maypaper::get_default_socket_path;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     net::UnixListener,
 };
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
-use crate::event::{AcquireServer, Ipc, IpcEvent, RequestServer, TokioEvent};
+use crate::event::{Ipc, IpcEvent, RequestServer, RequestWebview, TokioEvent};
 
 pub async fn ipc_server(tx: mpsc::UnboundedSender<TokioEvent>) {
     let socket_path = get_default_socket_path();
@@ -26,9 +26,9 @@ pub async fn ipc_server(tx: mpsc::UnboundedSender<TokioEvent>) {
     loop {
         let (stream, _addr) = match listener.accept().await {
             Ok(v) => {
-                info!(target: "ipc", v = ?v, "Accepted listener");
+                debug!(target: "ipc", v = ?v, "Accepted listener");
                 v
-            },
+            }
             Err(e) => {
                 error!(target: "ipc", error = %e, "Accept error");
                 continue;
@@ -46,25 +46,36 @@ pub async fn ipc_server(tx: mpsc::UnboundedSender<TokioEvent>) {
                 }
 
                 match serde_json::from_str::<Ipc>(line) {
-                    Ok(msg) => {
-                        match &msg {
-                            Ipc::Set { monitor, uri } => {
-                                info!(target: "ipc", "Received Set");
+                    Ok(msg) => match &msg {
+                        Ipc::SetPath { monitor, path } => {
+                            info!(target: "ipc", "Received SetPath");
 
-                                let request_server = RequestServer {
-                                    path: uri.clone(),
-                                    connector: monitor.clone(),
-                                };
-                                info!(target: "ipc", request_server = ?request_server, "Sending");
-                                let _ = tx.send(TokioEvent::IpcEvent(IpcEvent::RequestServer(request_server)));
-                                info!(target: "ipc", "Sent");
-                            }
-                            _ => {
-                                //let _ = tx.send(TokioEvent::IpcEvent(IpcEvent::Ipc(msg)));
-                                // TODO
-                            }
+                            let request_server = RequestServer {
+                                path: path.clone(),
+                                connector: monitor.clone(),
+                            };
+                            debug!(target: "ipc", request_server = ?request_server, "Sending");
+                            let _ = tx.send(TokioEvent::IpcEvent(IpcEvent::RequestServer(
+                                request_server,
+                            )));
+                            debug!(target: "ipc", "Sent");
                         }
-                    }
+
+                        Ipc::SetUrl { monitor, url } => {
+                            info!(target: "ipc", "Received SetUrl");
+
+                            let request_webview = RequestWebview {
+                                url: url.clone(),
+                                connector: monitor.clone(),
+                            };
+
+                            debug!(target: "ipc", request_webview = ?request_webview, "Sending");
+                            let _ = tx.send(TokioEvent::IpcEvent(IpcEvent::RequestWebview(
+                                request_webview,
+                            )));
+                            debug!(target: "ipc", "Sent");
+                        }
+                    },
                     Err(e) => error!(target: "ipc", line = %line, error = %e, "bad JSON"),
                 }
             }
