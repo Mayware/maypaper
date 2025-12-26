@@ -130,7 +130,8 @@ pub async fn web_manager(
 }
 
 async fn run_web(listener: TcpListener, path: String, shutdown: oneshot::Receiver<()>) {
-    info!(target: "web", path = %path, "Starting webserver");
+    let addr = listener.local_addr().unwrap();
+    info!(target: "web", _path = %path, %addr, "Starting webserver");
 
     let static_site = ServeDir::new(path.clone()).append_index_html_on_directories(true);
 
