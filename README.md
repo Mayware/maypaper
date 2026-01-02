@@ -11,7 +11,8 @@ https://github.com/user-attachments/assets/e5fda2fb-4649-4fdb-ab92-9d1d9f168a0f
 Maypaper is a tool which allows you to put a webpage (ideally locally installed, or remote) as your wallpaper, using QT's webengine (chromium). If local, it automatically starts a webserver to serve that page, and spins it down as required.
 
 ## Usage
-Maypaper includes 3 binaries, `maypaper`, `mypctl` and `myptmp`.
+Maypaper includes 3 binaries, `maypaper`, `mypctl` and `myptmp`.  
+Please see the [wiki](https://github.com/Mayware/maypaper/wiki/mypctl), to see how to use the program
 
 ### maypaper
 `maypaper` is the main binary, which runs the wallpaper program. Run `maypaper --help` to get a list of all arguments. `maypaper` is configured purely over IPC, or by arguments and has no direct configuration file.
